@@ -18,12 +18,12 @@ from utils.ink_mask import InkWashMaskGenerator
 INPUT_TXT_DIR = "/home/610-sty/layout2paint3/outputs/layout/txt"
 
 # 2. 输出结果保存路径 (建议改名区分)
-OUTPUT_IMAGE_DIR = "./inference_peft_15000_results"
+OUTPUT_IMAGE_DIR = "./inference_peft_60000_results"
 
 # 3. 模型路径
 BASE_MODEL = "/home/610-sty/huggingface/Taiyi-Stable-Diffusion-1B-Chinese-v0.1"
 # 指向 V18 训练出的 Checkpoint
-CHECKPOINT_DIR = "/home/610-sty/layout2paint3/outputs/taiyi_shanshui_v16_pure"
+CHECKPOINT_DIR = "/home/610-sty/layout2paint3/outputs/taiyi_shanshui_v18_hardcore/checkpoint-65000"
 
 CONTROLNET_PATH = os.path.join(CHECKPOINT_DIR, "controlnet_structure")
 LORA_PATH = os.path.join(CHECKPOINT_DIR, "unet_lora")
