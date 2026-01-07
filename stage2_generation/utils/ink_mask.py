@@ -1,4 +1,4 @@
-# File: stage2_generation/utils/ink_mask.py (V10.0: Organic Ink & Physics Texture)
+# File: stage2_generation/utils/ink_mask.py (V10.1: Hybrid Anchor & Organic Physics)
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
@@ -10,12 +10,12 @@ import cv2
 
 class InkWashMaskGenerator:
     """
-    [V10.0 终极融合版] 有机墨迹生成器
+    [V10.1 锚点加强版] 有机墨迹生成器
     
     核心特性:
-    1. Polygon Distortion: 将矩形框转化为不规则多边形，彻底消除人工方框感。
-    2. Distance Gradient: 利用距离变换模拟墨水从中心向边缘的自然衰减。
-    3. Physics Texture: 保留 V9.9 的枯湿笔触物理模拟。
+    1. Polygon Distortion: 保留 Rotation 和 Bias 物理势态。
+    2. Hybrid Control: 引入“外刚内柔”架构。外部由 100% 不透明硬边锁定坐标，内部由物理纹理表达 Flow。
+    3. Physics Texture: 保留 V9.9 的枯湿笔触模拟。
     """
     
     CLASS_COLORS = {
@@ -36,7 +36,7 @@ class InkWashMaskGenerator:
         
     def _rotate_point(self, px, py, cx, cy, angle):
         """绕中心点旋转坐标"""
-        theta = angle * math.pi / 2.0  # 假设 angle 是 [0,1] 对应 90度，或者根据你的定义调整
+        theta = angle * math.pi / 2.0 
         cos_t = math.cos(theta)
         sin_t = math.sin(theta)
         nx = cos_t * (px - cx) - sin_t * (py - cy) + cx
@@ -48,9 +48,8 @@ class InkWashMaskGenerator:
         生成不规则多边形顶点，模拟手绘/墨迹边缘
         """
         points = []
-        segments = 8  # 每条边的细分段数
+        segments = 8 
         
-        # 矩形四个角点 (未旋转)
         cx, cy = x + w/2, y + h/2
         tl, tr = (x, y), (x + w, y)
         br, bl = (x + w, y + h), (x, y + h)
@@ -58,18 +57,13 @@ class InkWashMaskGenerator:
         def get_line_points(start, end):
             res = []
             vx, vy = end[0] - start[0], end[1] - start[1]
-            length = math.sqrt(vx**2 + vy**2)
             for i in range(segments):
                 alpha = i / segments
-                # 基础线性插值
                 px = start[0] + vx * alpha
                 py = start[1] + vy * alpha
                 
-                # 垂直方向的随机扰动 (Perpendicular Noise)
-                # 只有中间段抖动大，角点抖动小
                 noise_scale = math.sin(alpha * math.pi) * roughness * max(w, h) * 0.5
                 perp_x, perp_y = -vy, vx
-                # 归一化垂直向量
                 norm = math.sqrt(perp_x**2 + perp_y**2) + 1e-6
                 perp_x /= norm
                 perp_y /= norm
@@ -78,7 +72,6 @@ class InkWashMaskGenerator:
                 px += perp_x * noise
                 py += perp_y * noise
                 
-                # 旋转
                 if rot != 0:
                     px, py = self._rotate_point(px, py, cx, cy, rot)
                 
@@ -94,53 +87,44 @@ class InkWashMaskGenerator:
 
     def _apply_texture(self, field: np.ndarray, flow: float) -> np.ndarray:
         """
-        [V9.9 保留逻辑] 根据 flow 值给场添加水墨纹理
+        根据 flow 值给场添加水墨纹理
         """
         if field.max() < 0.05: return field
-
         noise = np.random.uniform(0, 1, field.shape).astype(np.float32)
         
         if flow < 0: 
-            # === 枯笔 (Dry Mode) ===
             dryness = abs(flow)
             threshold = 0.1 + 0.3 * dryness
             texture = (noise > threshold).astype(np.float32)
-            # 混合：保留部分底色，防止死黑空洞
             field = field * (0.4 + 0.6 * texture)
-            field = np.power(field, 0.8) # 略微锐化
-            
+            field = np.power(field, 0.8) 
         else:
-            # === 湿笔 (Wet Mode) ===
             wetness = flow
-            # 内部高斯模糊，模拟宣纸晕染
             k_size = int(7 * wetness) * 2 + 1
             if k_size > 1:
                 blurred = cv2.GaussianBlur(field, (k_size, k_size), 0)
                 field = 0.3 * field + 0.7 * blurred
-            
-            # 纸张纤维纹理
             texture = 1.0 - 0.2 * wetness * noise
             field = field * texture
-
         return np.clip(field, 0, 1)
 
     def convert_boxes_to_mask(self, boxes: Union[List[List[float]], torch.Tensor]) -> Image.Image:
-        # 画布初始化
+        # 1. 初始化原有的软势态画布 (NumPy)
         full_canvas = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        # [NEW] 初始化硬边锚点画布 (PIL)，使用 RGBA 以支持后期合成
+        anchor_canvas = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
+        anchor_draw = ImageDraw.Draw(anchor_canvas)
         
         if isinstance(boxes, torch.Tensor):
             boxes = boxes.cpu().numpy()
         
-        # 过滤与排序
         valid_boxes = []
         for b in boxes:
             if len(b) < 5: continue
-            # 强制最小尺寸，防止物体过小消失
             b[3] = max(b[3], 0.06) 
             b[4] = max(b[4], 0.06)
             valid_boxes.append(b)
         
-        # 按面积从大到小排序 (背景物体先画)
         sorted_boxes = sorted(valid_boxes, key=lambda b: b[3]*b[4], reverse=True)
             
         for box in sorted_boxes:
@@ -149,52 +133,52 @@ class InkWashMaskGenerator:
             
             # 解析参数
             cx, cy, w, h = box[1], box[2], box[3], box[4]
-            bx, by = (box[5], box[6]) if len(box) >= 7 else (0, 0)
             rot = box[7] if len(box) >= 8 else 0.0
-            flow = box[8] if len(box) >= 9 else 0.0 # [-1, 1]
+            flow = box[8] if len(box) >= 9 else 0.0
             
-            # 转换坐标
             pixel_x = (cx - w/2) * self.width
             pixel_y = (cy - h/2) * self.height
             pixel_w = w * self.width
             pixel_h = h * self.height
             
-            # 1. 生成不规则多边形 Mask
-            poly_points = self._distort_box(pixel_x, pixel_y, pixel_w, pixel_h, rot, roughness=0.25)
+            # A. 生成不规则多边形顶点 (保留形态势态)
+            poly_points = self._distort_box(pixel_x, pixel_y, pixel_w, pixel_h, rot, roughness=0.2)
             
-            # 使用 PIL 绘制单通道 Mask
+            # B. 绘制软势态层 (保留质感势态/Flow纹理)
             temp_img = Image.new('L', (self.width, self.height), 0)
-            ImageDraw.Draw(temp_img).polygon(poly_points, outline=255, fill=255)
+            ImageDraw.Draw(temp_img).polygon(poly_points, fill=255)
             mask_np = np.array(temp_img).astype(np.uint8)
             
-            # 2. 距离变换 (Distance Transform) -> 模拟墨水浓度
-            # 计算每个像素到背景的距离，形成从中心向外衰减的梯度
             dist_map = cv2.distanceTransform(mask_np, cv2.DIST_L2, 5)
             max_val = dist_map.max()
             if max_val > 0:
                 field = dist_map / max_val
-            else:
-                continue
+                field = self._apply_texture(field, flow)
+                
+                color = self.CLASS_COLORS[class_id]
+                object_layer = np.zeros_like(full_canvas)
+                for c in range(3):
+                    object_layer[:, :, c] = field * (color[c] / 255.0)
+                
+                alpha = np.clip(field * 1.8, 0, 1)
+                alpha = np.expand_dims(alpha, axis=2)
+                full_canvas = full_canvas * (1 - alpha) + object_layer * alpha
             
-            # 3. 应用纹理 (枯/湿)
-            field = self._apply_texture(field, flow)
-            
-            # 4. 上色与叠加
-            color = self.CLASS_COLORS[class_id]
-            object_layer = np.zeros_like(full_canvas)
-            for c in range(3):
-                object_layer[:, :, c] = field * (color[c] / 255.0)
-            
-            # Alpha 混合：使用 field 作为 alpha
-            # 增强一点 alpha 让主体更实，边缘更虚
-            alpha = np.clip(field * 1.8, 0, 1)
-            alpha = np.expand_dims(alpha, axis=2)
-            
-            full_canvas = full_canvas * (1 - alpha) + object_layer * alpha
+            # C. [关键新增] 绘制硬边锚点 (提供绝对坐标信号)
+            # 使用纯色线框锁定边界，宽度设为 3 像素确保 ControlNet 强力捕捉
+            line_color = self.CLASS_COLORS[class_id] + (255,) 
+            anchor_draw.line(poly_points + [poly_points[0]], fill=line_color, width=3)
 
-        # [Final Polish] 全局高斯模糊
-        # 这一步至关重要，它将所有图层的边缘融合，彻底消除"贴图感"
-        final_img = Image.fromarray(np.clip(full_canvas * 255, 0, 255).astype(np.uint8))
-        final_img = final_img.filter(ImageFilter.GaussianBlur(radius=3))
+        # 3. 最终合成
+        # 转换 NumPy 软势态到 PIL
+        soft_mask_np = np.clip(full_canvas * 255, 0, 255).astype(np.uint8)
+        soft_mask_img = Image.fromarray(soft_mask_np).convert("RGBA")
+        
+        # 将硬边锚点覆盖在软势态之上
+        final_img = Image.alpha_composite(soft_mask_img, anchor_canvas).convert("RGB")
+
+        # [V10.1 修改] 移除全局高斯模糊或将半径降至极低 (0.5)，确保线框信号清晰
+        # 如果依然觉得控制力不够，请直接注释掉下面这行
+        final_img = final_img.filter(ImageFilter.GaussianBlur(radius=0.5))
         
         return final_img

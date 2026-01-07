@@ -1,4 +1,4 @@
-# File: stage2_generation/scripts/train_taiyi.py (V18.0: Hardcore Style Training)
+# File: stage2_generation/scripts/train_taiyi.py (V18.2: Balanced Soft-Control)
 
 import argparse
 import logging
@@ -90,16 +90,15 @@ def compute_snr(timesteps, noise_scheduler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_name_or_path", type=str, default="Idea-CCNL/Taiyi-Stable-Diffusion-1B-Chinese-v0.1")
-    # [修改] 输出目录改为 v18_hardcore
-    parser.add_argument("--output_dir", type=str, default="taiyi_shanshui_v18_hardcore")
+    # [修改] 输出目录更新为 v18_soft_balanced
+    parser.add_argument("--output_dir", type=str, default="taiyi_shanshui_v18_soft_balanced")
     parser.add_argument("--train_data_dir", type=str, required=True)
     parser.add_argument("--resolution", type=int, default=512)
     parser.add_argument("--train_batch_size", type=int, default=4) 
-    # [修改] 增加轮数，因为 Dropout 高了收敛慢
     parser.add_argument("--num_train_epochs", type=int, default=50) 
     parser.add_argument("--learning_rate", type=float, default=2e-5)
-    # [修改] LoRA 学习率激进提升到 1e-4
-    parser.add_argument("--learning_rate_lora", type=float, default=1e-4)
+    # [修改] 降低 LoRA 学习率至 5e-5，追求更细腻纹理，防止过拟合
+    parser.add_argument("--learning_rate_lora", type=float, default=5e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--mixed_precision", type=str, default="fp16") 
     parser.add_argument("--checkpointing_steps", type=int, default=2000)
@@ -107,7 +106,6 @@ def main():
     parser.add_argument("--lambda_struct", type=float, default=0.0)
     parser.add_argument("--lambda_energy", type=float, default=0.0)
     
-    # [修改] Rank 翻倍，增加脑容量
     parser.add_argument("--lora_rank", type=int, default=128)
     parser.add_argument("--lora_alpha_ratio", type=float, default=1.0)
     parser.add_argument("--smart_freeze", action="store_true", default=False)
@@ -126,7 +124,8 @@ def main():
 
     if accelerator.is_main_process:
         logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-        logger.info(f"🚀 V18.0 启动: 破釜沉舟版 | Rank 128 | Mask Dropout 70% | True Validation")
+        # [修改] 更新日志信息
+        logger.info(f"🚀 V18.2 启动: 软硬平衡版 | Rank 128 | Mask Dropout 25% | Scale 0.85")
 
     # 1. 加载模型
     tokenizer = transformers.BertTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
@@ -166,15 +165,14 @@ def main():
     ]
     optimizer = torch.optim.AdamW(params_to_optimize)
 
-    # 4. 数据加载 (核心修改：真·验证集切分)
+    # 4. 数据加载
     raw_dataset = load_dataset("json", data_files=os.path.join(args.train_data_dir, "train.jsonl"))["train"]
-    # [修改] 显式切分 10% 做验证集，seed固定保证一致性
     split_dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
     train_dataset = split_dataset['train']
     test_dataset = split_dataset['test']
     
     if accelerator.is_main_process:
-        logger.info(f"📊 数据集分布: 训练集 {len(train_dataset)} | 验证集 {len(test_dataset)} (严禁作弊)")
+        logger.info(f"📊 数据集分布: 训练集 {len(train_dataset)} | 验证集 {len(test_dataset)}")
 
     transform = transforms.Compose([
         transforms.Resize((args.resolution, args.resolution)),
@@ -182,13 +180,11 @@ def main():
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
     
-    # 无模糊数据增强
     cond_transform = transforms.Compose([
         transforms.Resize((args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.ToTensor(), 
     ])
 
-    # BERT Fix
     null_prompt = tokenizer("", max_length=tokenizer.model_max_length, 
                             padding="max_length", truncation=True, return_tensors="pt")
     null_prompt_ids = null_prompt.input_ids[0]
@@ -204,7 +200,6 @@ def main():
                 pixel_values.append(transform(Image.open(img_path).convert("RGB")))
                 cond_pixel_values.append(cond_transform(Image.open(cond_path).convert("RGB")))
                 
-                # [REVERTED] 保持原始 Prompt，绝不乱加东西
                 caption = example["text"] 
                 texts.append(caption)
                 
@@ -258,25 +253,25 @@ def main():
                 timesteps = torch.randint(0, 1000, (latents.shape[0],), device=latents.device).long()
                 noisy_latents = scheduler.add_noise(latents, noise, timesteps)
                 
-                # [CORE FIX: 激进的 Dropout 策略] 
+                # [关键修改: 调整训练比例以强化布局控制] 
                 rand_num = random.random()
                 
-                # 默认: 全都要 (Text + Mask)
                 current_ids = batch["input_ids"]
                 current_mask = batch["attention_masks"]
                 cond_input = batch["conditioning_pixel_values"].to(dtype=torch.float16)
 
                 if rand_num < 0.1:
-                    # [Case A] 10% 丢弃 Text (保留 Mask)
+                    # [Case A] 10% 丢弃 Text (保持新锚点 Mask 的引导)
                     current_ids = null_prompt_ids.repeat(len(batch["input_ids"]), 1).to(device)
                     current_mask = null_prompt_mask.repeat(len(batch["input_ids"]), 1).to(device)
                 
-                elif rand_num < 0.8: # [修改] 提升至 70% 概率丢弃 Mask
-                    # [Case B] 70% 丢弃 Mask (保留 Text) -> 强迫模型只靠诗句猜风格
-                    # 这是 LoRA 学会风格的唯一机会！
+                # [修改] 将丢弃 Mask 的阈值调整为 0.35 (即 25% 概率)
+                # 提高纯文本训练比例，强迫 LoRA 脑补细节，避免过度依赖硬边
+                elif rand_num < 0.35: 
+                    # [Case B] 25% 丢弃 Mask -> 允许 LoRA 继续学习纯文本泛化
                     cond_input = torch.zeros_like(cond_input)
                 
-                # [Case C] 剩下的 20% (0.8~1.0) 全监督 (Text + Mask)
+                # [Case C] 剩下的 65% 强制进行全监督训练 (Text + Anchor Mask)
 
                 encoder_hidden_states = text_encoder(current_ids, attention_mask=current_mask)[0]
                 
@@ -288,7 +283,6 @@ def main():
                     mid_block_additional_residual=mid_res.to(dtype=torch.float16)
                 ).sample
 
-                # Min-SNR Loss
                 if args.snr_gamma == 0:
                     loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
                 else:
@@ -317,7 +311,7 @@ def main():
             
             global_step += 1
             if step % 10 == 0 and accelerator.is_main_process:
-                current_lr = optimizer.param_groups[1]["lr"] # 显示 LoRA 的 LR
+                current_lr = optimizer.param_groups[1]["lr"] 
                 print(f"Epoch {epoch+1} | Step {step} | Loss: {loss.item():.4f} | LoRA LR: {current_lr:.2e}")
 
             if global_step % args.checkpointing_steps == 0 and accelerator.is_main_process:
@@ -326,9 +320,6 @@ def main():
                 accelerator.unwrap_model(controlnet).save_pretrained(ckpt_dir / "controlnet_structure") 
                 accelerator.unwrap_model(unet).save_pretrained(ckpt_dir / "unet_lora")
 
-        # ===============================================
-        # [关键修改] 验证阶段：不再作弊，随机考新题
-        # ===============================================
         if accelerator.is_main_process:
             controlnet.eval(); unet.eval()
             try:
@@ -340,9 +331,9 @@ def main():
                     ).to(device)
                     pipe.set_progress_bar_config(disable=True)
                     
-                    val_neg = "真实照片，摄影感，3D渲染，锐利边缘，现代感，鲜艳色彩，油画，水粉画，杂乱，模糊，重影"
+                    # [修改] 增加负向提示词，修饰过硬的边界
+                    val_neg = "hard edges, sticker-like, flat color, cartoon, split screen, low quality, bad anatomy, 真实照片，摄影感，3D渲染，锐利边缘，现代感，鲜艳色彩，油画，水粉画，杂乱，模糊，重影"
                     
-                    # [修改] 随机从测试集取样本，而不是训练集
                     idx = random.randint(0, len(test_dataset)-1)
                     test_sample = test_dataset[idx]
                     
@@ -351,17 +342,19 @@ def main():
                     val_cond_tensor = cond_transform(val_cond_img).unsqueeze(0).to(device, dtype=torch.float16)
                     val_prompt = test_sample["text"]
                     
-                    print(f"📷 正在验证 (Unseen Data): {val_prompt}")
+                    print(f"📷 正在验证 (Soft Balanced): {val_prompt}")
 
                     sample_img = pipe(
                         prompt=val_prompt, 
                         negative_prompt=val_neg, 
                         image=val_cond_tensor,
                         num_inference_steps=30, 
-                        controlnet_conditioning_scale=0.6, # 验证时也调低权重，给LoRA空间
+                        # [修改] 权重退回 0.85，给 LoRA 留出空间
+                        controlnet_conditioning_scale=0.85, 
+                        # [修改] 最后 30% 步数撤销控制，让边缘自然晕染
+                        control_guidance_end=0.7 
                     ).images[0]
                     
-                    # 带上 Step 以便观察变化
                     sample_img.save(Path(args.output_dir) / f"val_epoch_{epoch+1}_step_{global_step}.png")
                     val_cond_img.save(Path(args.output_dir) / f"val_epoch_{epoch+1}_layout.png")
                     print(f"📷 验证图已保存。")
@@ -377,7 +370,7 @@ def main():
     if accelerator.is_main_process:
         accelerator.unwrap_model(controlnet).save_pretrained(Path(args.output_dir) / "controlnet_structure")
         accelerator.unwrap_model(unet).save_pretrained(Path(args.output_dir) / "unet_lora")
-        print(f"✅ V18.0 训练完成 (Rank128 + HighDropout)。")
+        print(f"✅ V18.2 训练完成 (Balanced Soft-Control Mode)。")
 
 if __name__ == "__main__":
     main()
