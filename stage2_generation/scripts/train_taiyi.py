@@ -107,7 +107,7 @@ def main():
     parser.add_argument("--lambda_energy", type=float, default=0.0)
     
     parser.add_argument("--lora_rank", type=int, default=128)
-    parser.add_argument("--lora_alpha_ratio", type=float, default=1.0)
+    parser.add_argument("--lora_alpha_ratio", type=float, default=0.05)
     parser.add_argument("--smart_freeze", action="store_true", default=False)
     
     parser.add_argument("--snr_gamma", type=float, default=5.0, help="Min-SNR 权重")

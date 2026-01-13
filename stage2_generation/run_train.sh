@@ -27,8 +27,8 @@ mkdir -p "$HF_HOME"
 DATA_DIR="$PROJECT_ROOT/taiyi_energy_dataset_v9_2" 
 
 # [核心修改 2: 输出路径]
-# 改为 V18_hardcore，对应我们的新策略
-OUTPUT_DIR="$PROJECT_ROOT/outputs/taiyi_shanshui_v18_hardcore"
+# 改为 V19_breath，对应我们的"呼吸感"策略
+OUTPUT_DIR="$PROJECT_ROOT/outputs/taiyi_shanshui_v19_breath"
 
 # [基础模型路径] (保持本地绝对路径)
 MODEL_NAME="/home/610-sty/huggingface/Taiyi-Stable-Diffusion-1B-Chinese-v0.1"
@@ -59,12 +59,12 @@ use_cpu: false
 EOF
 fi
 
-# 3. 启动训练 (V18.0 破釜沉舟版)
+# 3. 启动训练 (V19.0)
 echo "========================================================"
-echo "🚀 启动 Stage 2 V18.0 训练 (Rank 128 | High LR | Mask Dropout 70%)"
+echo "🚀 启动 Stage 2 V19.0 训练 (Rank 64 | Tuned LR | 强Mask+柔LoRA)"
 echo "   数据源: $DATA_DIR"
 echo "   输出目录: $OUTPUT_DIR"
-echo "   策略: 强制逼出水墨风格"
+echo "   策略: 强控制力 + 水墨韵味平衡"
 echo "========================================================"
 
 # [核心参数调整]
@@ -81,15 +81,15 @@ accelerate launch --config_file "$ACCELERATE_CONFIG" --mixed_precision="fp16" st
   --mixed_precision="fp16" \
   \
   --learning_rate=2e-5 \
-  --learning_rate_lora=1e-4 \
+  --learning_rate_lora=5e-5 \
   \
-  --lora_rank=128 \
+  --lora_rank=64 \
   --lora_alpha_ratio=1.0 \
   \
   --lambda_struct=0.0 \
   --lambda_energy=0.0 \
   \
   --snr_gamma=5.0 \
-  --offset_noise_scale=0.1
+  --offset_noise_scale=0.05
 
-echo "✅ 训练结束。请务必检查验证图 (val_epoch_*.png) 是否出现水墨风格！"
+echo "✅ 训练结束。请检查验证图是否兼具构图控制与水墨笔触！"
